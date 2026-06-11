@@ -9,20 +9,20 @@ BOOT_MEDIA=sdcard
 ```
 总之分点目标或清单可用概括为：
 ```
-[ ] i.MX6ULL 实板可启动
-[ ] 串口启动日志可保存
-[ ] Linux shell 可登录
-[ ] /etc/edgeguard_version 可读
-[ ] Buildroot 版本已固定
-[ ] configs/buildroot_defconfig 已固定
-[ ] 烧录方式已记录
-[ ] 启动参数 bootargs 已记录
-[ ] rootfs 来源清楚
-[ ] kernel 来源清楚
-[ ] dtb 来源清楚
-[ ] U-Boot 来源清楚
-[ ] 项目目录结构稳定
-[ ] 已经有 Git commit
+[√] i.MX6ULL 实板可启动
+[√] 串口启动日志可保存
+[√] Linux shell 可登录
+[√] /etc/edgeguard_version 可读
+[√] Buildroot 版本已固定
+[√] configs/buildroot_defconfig 已固定
+[√] 烧录方式已记录
+[√] 启动参数 bootargs 已记录
+[√] rootfs 来源清楚
+[√] kernel 来源清楚
+[√] dtb 来源清楚
+[√] U-Boot 来源清楚
+[√] 项目目录结构稳定
+[√] 已经有 Git commit
 ```
 ## 优先级
 - 优先级 1：复用厂家 U-Boot
