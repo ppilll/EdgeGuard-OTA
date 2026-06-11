@@ -1,9 +1,10 @@
 # VS Code 本地配置
 .vscode/
 
-# 编译/外部产物
+# 编译/外部产物/备份
 output/
 external/
+backups/
 
 # 其他常见编译产物，可按需保留
 *.o

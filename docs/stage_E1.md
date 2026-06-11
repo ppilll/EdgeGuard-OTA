@@ -30,6 +30,7 @@ BOOT_MEDIA=sdcard
 - 优先级 3：独立移植 U-Boot，仅作为风险项
 
 ## E1阶段新增文件介绍
-[imx6ull_board_info.md](configs/imx6ull_board_info.md)
-开发板板级信息
+[imx6ull_board_info.md](configs/imx6ull_board_info.md) 开发板板级信息
+[E1_use_docs.md](docs/E1_use_docs.md) E1阶段构建脚本快速使用
+
 
