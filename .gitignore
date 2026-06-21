@@ -6,6 +6,8 @@ output/
 external/
 backups/
 reports/
+releases/
+
 
 # 其他常见编译产物，可按需保留
 *.o
