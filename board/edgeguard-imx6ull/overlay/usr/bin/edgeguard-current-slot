@@ -1,0 +1,19 @@
+#!/bin/sh
+
+CMDLINE="$(cat /proc/cmdline)"
+
+case "$CMDLINE" in
+  *"rauc.slot=A"*)
+    echo "SLOT=A"
+    echo "ROOTFS=/dev/mmcblk0p2"
+    ;;
+  *"rauc.slot=B"*)
+    echo "SLOT=B"
+    echo "ROOTFS=/dev/mmcblk0p3"
+    ;;
+  *)
+    echo "SLOT=unknown"
+    echo "CMDLINE=$CMDLINE"
+    exit 1
+    ;;
+esac

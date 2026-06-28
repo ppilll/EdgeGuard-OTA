@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+
+echo "EdgeGuard boot success ack with RAUC U-Boot backend"
+
+echo
+echo "[runtime]"
+cat /proc/cmdline
+cat /etc/edgeguard_version 2>/dev/null || true
+edgeguard-current-slot || true
+findmnt /
+mount | grep ' /data ' || true
+
+echo
+echo "[rauc status before mark-good]"
+rauc status --detailed || true
+
+echo
+echo "[mark-good]"
+rauc status mark-good booted
+
+echo
+echo "[optional low-level cleanup]"
+fw_setenv bootcount 0 || true
+fw_setenv upgrade_available 0 || true
+
+echo
+echo "[state after mark-good]"
+rauc status --detailed || true
+fw_printenv BOOT_ORDER || true
+fw_printenv BOOT_A_LEFT || true
+fw_printenv BOOT_B_LEFT || true
+fw_printenv bootcount || true
+fw_printenv upgrade_available || true

@@ -28,4 +28,4 @@ certs/*.srl
 
 # Generated RAUC bundles
 *.raucb
-bundles/output/*.raucb
+bundles/

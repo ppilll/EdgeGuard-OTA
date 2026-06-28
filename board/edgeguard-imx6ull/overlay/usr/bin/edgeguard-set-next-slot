@@ -1,0 +1,50 @@
+#!/bin/sh
+set -eu
+
+NEXT="${1:-}"
+
+case "$NEXT" in
+  A|B)
+    ;;
+  *)
+    echo "Usage: $0 {A|B}" >&2
+    exit 2
+    ;;
+esac
+
+CMDLINE="$(cat /proc/cmdline)"
+
+case "$CMDLINE" in
+  *"rauc.slot=A"*)
+    CUR=A
+    ;;
+  *"rauc.slot=B"*)
+    CUR=B
+    ;;
+  *)
+    echo "ERROR: cannot determine current slot from /proc/cmdline" >&2
+    cat /proc/cmdline >&2
+    exit 1
+    ;;
+esac
+
+if [ "$NEXT" = "$CUR" ]; then
+  echo "ERROR: next slot equals current slot: $CUR" >&2
+  echo "Current slot: $CUR" >&2
+  echo "Requested next: $NEXT" >&2
+  exit 1
+fi
+
+fw_printenv eg_boot >/dev/null
+
+fw_setenv eg_prev "$CUR"
+fw_setenv eg_next "$NEXT"
+fw_setenv eg_up 1
+fw_setenv eg_try 1
+
+echo "EdgeGuard next slot set:"
+echo "Current slot: $CUR"
+fw_printenv eg_prev
+fw_printenv eg_next
+fw_printenv eg_up
+fw_printenv eg_try

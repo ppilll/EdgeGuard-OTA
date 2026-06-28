@@ -1,0 +1,61 @@
+#!/bin/sh
+#
+# EdgeGuard E4 data partition mount helper.
+# Purpose:
+#   Ensure /dev/mmcblk0p4 is mounted at /data early enough for RAUC status,
+#   bundles, scripts, and logs.
+#
+
+set -eu
+
+DATA_DEV="/dev/mmcblk0p4"
+DATA_MNT="/data"
+
+case "${1:-start}" in
+  start)
+    echo "[S11edgeguard-data] start"
+
+    mkdir -p "$DATA_MNT"
+
+    if grep -q " ${DATA_MNT} " /proc/mounts; then
+      echo "[S11edgeguard-data] ${DATA_MNT} already mounted"
+    else
+      if [ ! -b "$DATA_DEV" ]; then
+        echo "[S11edgeguard-data] ERROR: missing block device ${DATA_DEV}"
+        exit 1
+      fi
+
+      if mount "$DATA_MNT"; then
+        echo "[S11edgeguard-data] mounted ${DATA_MNT} via fstab"
+      elif mount "$DATA_DEV" "$DATA_MNT"; then
+        echo "[S11edgeguard-data] mounted ${DATA_DEV} on ${DATA_MNT}"
+      else
+        echo "[S11edgeguard-data] ERROR: failed to mount ${DATA_DEV} on ${DATA_MNT}"
+        exit 1
+      fi
+    fi
+
+    mkdir -p \
+      "$DATA_MNT/rauc" \
+      "$DATA_MNT/bundles" \
+      "$DATA_MNT/logs" \
+      "$DATA_MNT/scripts"
+
+    echo "[S11edgeguard-data] data partition ready"
+    ;;
+
+  stop)
+    echo "[S11edgeguard-data] stop: no action"
+    ;;
+
+  restart|reload)
+    "$0" start
+    ;;
+
+  *)
+    echo "Usage: $0 {start|stop|restart|reload}"
+    exit 1
+    ;;
+esac
+
+exit 0

@@ -110,3 +110,6 @@ openssl x509 \
 
 把公钥放证书放入rootfs overlay
 
+```
+setenv bootargs 'console=ttymxc0,115200 root=/dev/mmcblk0p3 rootwait rw rootfstype=ext4 rauc.slot=B'
+```

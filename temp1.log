@@ -1,0 +1,1251 @@
+你现在是我的嵌入式 Linux / BSP / OTA 产品构建教练，不是最终审查官。
+
+我要逐阶段完成的产品是：
+
+# EdgeGuard OTA：嵌入式 Linux A/B OTA 与掉电可靠性测试平台
+
+你的任务是帮助我把每个阶段真正做出来，而不是只审查我是否完成。你需要像产品导师、BSP 工程师、Bootloader 工程师、OTA 工程师、Linux Kernel 工程师、项目经理一样，帮我拆任务、定边界、给模板、给命令、给文档结构、给最小可验证实验、给降级方案。
+
+---
+
+# 一、产品最终目标
+
+我要做出一个可交付的嵌入式 Linux OTA 可靠性测试产品，最终支持：
+
+* A/B rootfs
+* 安全升级
+* 自动 OTA 升级
+* 失败回滚
+* watchdog 自恢复
+* health check
+* 随机掉电测试
+* 串口日志采集
+* 自动测试报告
+* 可复现镜像交付
+* Linux kernel 关键能力裁剪与验证
+
+第一版优先保证：
+
+* 能启动
+* 能升级
+* 能自动切槽
+* 能失败回滚
+* 能 health check
+* 能 watchdog 自恢复
+* 能验证关键 kernel capability
+* 能测试
+* 能报告
+
+不要一开始让我做复杂 UI、云平台、多设备管理、差分升级。
+
+---
+
+# 二、阶段划分
+
+项目阶段如下：
+
+* E0：产品定义与需求边界
+* E1：基础系统与可复现构建
+* E2：A/B 分区与 U-Boot 启动链路
+* E3：OTA 正常升级链路
+* E4：RAUC + U-Boot bootloader 集成与失败回滚链路
+* E5：watchdog + health check + kernel critical capability validation
+* E6：随机掉电可靠性测试台
+* E7：产品化交付与简历包装
+
+当前我要进入：
+
+# E5：watchdog + health check + kernel critical capability validation
+
+---
+
+# 三、E5 阶段一句话目标
+
+E5 的一句话目标是：
+
+在 E4 已经完成 RAUC + U-Boot A/B 回滚链路的基础上，
+引入 health check 和 watchdog，使新槽位只有在用户态健康检查成功后才 mark-good；如果 health check 失败、卡死或不执行，系统能够通过 reboot/watchdog/BOOT_LEFT 机制回到旧 good 槽，同时裁剪并验证 Linux kernel 中 OTA 必需的 MMC、ext4、UART、watchdog 等关键能力。
+
+---
+
+# 四、E5 阶段重新定义
+
+E5 包含三条子线，但主线仍然是 OTA 可靠性。
+
+## E5-H：Health Check
+
+目标：
+
+* 新 slot 启动后，不立即认为升级成功；
+* 执行最小 health check；
+* 检查通过后执行 `rauc status mark-good`；
+* 检查失败后不 mark-good，或执行 `rauc status mark-bad`，再 reboot；
+* 让 RAUC/U-Boot 的 BOOT_A_LEFT / BOOT_B_LEFT 回滚机制继续发挥作用。
+
+## E5-W：Watchdog
+
+目标：
+
+* 验证 Linux watchdog 设备是否存在；
+* 验证 `/dev/watchdog` 可用；
+* 实现一个最小 watchdog keeper；
+* health check 正常时喂狗；
+* health check 失败、卡死或 keeper 不喂狗时，系统 reset；
+* reset 后回到 U-Boot，由 E4 已完成的 BOOT_ORDER / BOOT_A_LEFT / BOOT_B_LEFT 机制决定继续尝试或回滚。
+
+## E5-K：Kernel Critical Capability Baseline & Trim
+
+目标：
+
+* 不再完全依赖厂商默认“大内核”；
+* 梳理并裁剪 OTA 产品必需的 kernel capability；
+* 重点验证：
+
+  * MMC / SD 启动与 rootfs 访问
+  * ext4 rootfs 与 data 分区挂载
+  * UART 串口 console 与日志采集
+  * watchdog 驱动和 `/dev/watchdog`
+* 每次裁剪后都必须证明 E1~E4 主链路仍可用。
+
+E5-K 不是完整 kernel 移植阶段，也不是追求极限小内核。它是“产品关键内核能力可控化”。
+
+---
+
+# 五、我已经完成的 E1 状态
+
+E1 已完成，当前状态如下：
+
+在 i.MX6ULL 真实开发板上，我已经完成：
+
+* 使用固定 Buildroot 版本；
+* 使用固定 Buildroot defconfig；
+* Buildroot 只构建 rootfs；
+* 使用厂商提供的 U-Boot；
+* 使用厂商提供的 Linux kernel；
+* 将系统烧录到 SD 卡；
+* 开发板可从 SD 卡启动；
+* 可通过串口登录 shell；
+* 系统内可以执行：
+
+```sh
+cat /etc/edgeguard_version
+```
+
+并看到对应版本信息。
+
+当前 E1 的重要约束：
+
+* Buildroot 当前主要负责 rootfs；
+* U-Boot 使用厂商版本；
+* kernel 最初使用厂商版本；
+* 启动介质主要是 SD 卡；
+* 调试方式是串口；
+* 目标板是 i.MX6ULL 真实开发板；
+* 不使用 QEMU。
+
+---
+
+# 六、我已经完成的 E2 状态
+
+E2 已完成，当前状态如下：
+
+在 i.MX6ULL 真实开发板上，我已经完成：
+
+* SD 卡已经具备 A/B rootfs 分区布局；
+* 当前实际分区为：
+
+```text
+/dev/mmcblk0p2 = rootfs_A
+/dev/mmcblk0p3 = rootfs_B
+/dev/mmcblk0p4 = data
+```
+
+* rootfs_A 可以独立启动；
+* rootfs_B 可以独立启动；
+* U-Boot 可以选择启动 rootfs_A；
+* U-Boot 可以选择启动 rootfs_B；
+* Linux 用户态可以识别当前启动的是 A 还是 B；
+* 已保存 U-Boot 原始环境变量；
+* 已保存 A/B 启动命令；
+* 已保存 A 槽启动串口日志；
+* 已保存 B 槽启动串口日志；
+* 已记录分区表；
+* 已记录烧录方式。
+
+---
+
+# 七、我已经完成的 E3 状态
+
+E3 已完成，当前系统已经验证了完整的“正常 OTA 主链路”。
+
+当前状态如下：
+
+* 当前运行槽 A；
+* A 槽 rootfs 设备为：
+
+```text
+/dev/mmcblk0p2
+```
+
+* A 槽运行版本为：
+
+```text
+0.3.0-e3
+```
+
+* 主机端可以构建新版本 rootfs；
+* 主机端可以将 rootfs.tar 封装为 RAUC bundle；
+* 目标板从 A 启动后执行：
+
+```sh
+rauc install <bundle>.raucb
+```
+
+* RAUC 将 bundle 中的 rootfs.tar 安装到 inactive B；
+* B 槽 rootfs 设备为：
+
+```text
+/dev/mmcblk0p3
+```
+
+* 从 B 启动后验证：
+
+```sh
+cat /etc/edgeguard_version
+cat /etc/edgeguard_slot
+cat /proc/cmdline
+findmnt /
+mount | grep /data
+rauc status
+```
+
+结果为：
+
+```text
+/etc/edgeguard_version = 0.3.1-e3
+/etc/edgeguard_slot = SLOT=B
+/proc/cmdline 包含 root=/dev/mmcblk0p3
+/proc/cmdline 包含 rauc.slot=B
+/data 挂载自 /dev/mmcblk0p4
+RAUC 识别当前 booted slot 为 rootfs.1
+```
+
+---
+
+# 八、我已经完成的 E4 状态
+
+E4 已完成，当前系统已经把失败回滚主责从旧的 `eg_try / eg_up / eg_fb` 自定义状态机迁移到了：
+
+```text
+RAUC bootloader=uboot
++
+U-Boot BOOT_ORDER
++
+BOOT_A_LEFT
++
+BOOT_B_LEFT
+```
+
+当前 E4 已完成：
+
+* RAUC `bootloader=uboot` 已集成；
+* U-Boot 使用 `BOOT_ORDER` 决定启动顺序；
+* U-Boot 使用 `BOOT_A_LEFT` / `BOOT_B_LEFT` 控制每个 slot 的剩余启动尝试次数；
+* A/B 自动 OTA 已完成；
+* A→B 自动 OTA 已通过；
+* B→A 自动 OTA 已通过；
+* `/data` 自动挂载已固化；
+* `fw_printenv` / `fw_setenv` Linux 侧可用；
+* OTA 入口脚本可用；
+* bad signature / untrusted cert bundle 拒绝安装已通过；
+* compatible mismatch bundle 拒绝安装已通过；
+* wrapper 脚本失败短路已通过；
+* 真正的 bad boot rollback 已通过：
+
+  * 坏 B 槽多次启动失败；
+  * `BOOT_B_LEFT` 被消耗到 0；
+  * U-Boot 自动回到旧 good A 槽。
+
+这意味着 E5 可以建立在一个相对完整的 bootloader fallback 基础上。
+
+---
+
+# 九、当前关键事实
+
+当前系统中，E4 的 fallback 主链路已经是：
+
+```text
+RAUC 安装新版本到 inactive slot
+→ RAUC/U-Boot 设置 BOOT_ORDER
+→ U-Boot 尝试启动新 slot
+→ 新 slot 启动失败
+→ BOOT_<slot>_LEFT 被消耗
+→ 尝试次数用尽
+→ U-Boot 自动回到旧 good slot
+```
+
+E5 要继续在这个基础上做：
+
+```text
+新 slot 能启动到 Linux 用户态
+→ health check 判断是否健康
+→ 健康则 mark-good，重置 BOOT_<slot>_LEFT
+→ 不健康则 mark-bad 或不 mark-good 并 reboot
+→ 用户态卡死则 watchdog reset
+→ reset 后由 E4 的 U-Boot fallback 机制处理
+```
+
+---
+
+# 十、E5 阶段不做什么
+
+E5 明确不做：
+
+* 不重新设计 E4 的 BOOT_ORDER / BOOT_A_LEFT / BOOT_B_LEFT；
+* 不回退到旧的 eg_try 状态机；
+* 不做随机掉电测试；
+* 不做继电器电源控制；
+* 不做云端 OTA；
+* 不做 Web UI；
+* 不做多设备管理；
+* 不做差分升级；
+* 不做复杂业务系统；
+* 不做极限 kernel 裁剪；
+* 不做完整安全启动 secure boot；
+* 不做生产级证书生命周期管理。
+
+E5 可以做 kernel config 裁剪，但必须围绕 OTA 必需能力，不能为了“内核越小越好”破坏 E1~E4 主链路。
+
+---
+
+# 十一、E5 最小验收标准
+
+E5 通过的最低标准包括三部分。
+
+## E5-H：health check 验收
+
+1. 新 slot 启动后能自动运行 health check；
+2. health check 至少检查：
+
+   * 当前 slot；
+   * 当前版本；
+   * `/proc/cmdline` 中的 `rauc.slot`;
+   * `/` 根分区；
+   * `/data` 是否挂载；
+   * `/data` 是否可写；
+   * `rauc status` 是否可读；
+   * 当前 booted slot 是否与实际 rootfs 匹配；
+3. health check 通过后执行：
+
+```sh
+rauc status mark-good
+```
+
+4. mark-good 后对应 slot 的 `BOOT_A_LEFT` 或 `BOOT_B_LEFT` 被恢复；
+5. health check 失败时不 mark-good；
+6. health check 失败时可执行 `rauc status mark-bad` 或 reboot；
+7. 失败后 E4 的 U-Boot fallback 机制仍然可用。
+
+## E5-W：watchdog 验收
+
+1. kernel 中启用了 watchdog 相关驱动；
+2. 目标系统存在：
+
+```sh
+/dev/watchdog
+```
+
+3. 能读取 watchdog 信息，例如：
+
+```sh
+ls -l /dev/watchdog*
+dmesg | grep -i watchdog
+```
+
+4. watchdog keeper 正常运行时系统不复位；
+5. 停止喂狗后系统自动 reset；
+6. reset 后 U-Boot 仍能进入 E4 的 BOOT_ORDER fallback 流程；
+7. 如果新 slot 因用户态卡死无法执行 health check，watchdog 能触发 reset。
+
+## E5-K：kernel capability 验收
+
+1. 已保存厂商 kernel baseline config；
+2. 已建立 E5 kernel capability matrix；
+3. 已裁剪并验证以下关键能力：
+
+   * MMC / SD rootfs 访问；
+   * ext4 rootfs 挂载；
+   * ext4 `/data` 挂载；
+   * UART 串口 console；
+   * watchdog 驱动；
+4. 裁剪后的 kernel 仍可：
+
+   * 从 SD 卡启动；
+   * 挂载 rootfs_A；
+   * 挂载 rootfs_B；
+   * 挂载 `/data`;
+   * 串口输出 U-Boot + kernel + userland 日志；
+   * 运行 RAUC；
+   * 执行 E4 fallback；
+   * 运行 health check；
+   * 触发 watchdog reset；
+5. 已保存裁剪前后 kernel config diff；
+6. 已保存裁剪后启动日志；
+7. 已保存 E5 报告。
+
+---
+
+# 十二、E5 推荐实现顺序
+
+请按以下顺序带我推进，不要乱序。
+
+## Step 0：冻结 E4 baseline
+
+先保存当前可工作的 E4 状态：
+
+```sh
+fw_printenv > reports/logs/E5_uboot_env_before.txt
+rauc status > reports/logs/E5_rauc_status_before.txt
+cat /proc/cmdline > reports/logs/E5_cmdline_before.txt
+mount > reports/logs/E5_mount_before.txt
+dmesg > reports/logs/E5_dmesg_before.txt
+```
+
+并备份 SD 卡。
+
+## Step 1：E5-K kernel capability inventory
+
+先不裁剪，只做盘点：
+
+```sh
+zcat /proc/config.gz > reports/logs/E5_kernel_config_runtime.txt 2>/dev/null || true
+cat /boot/config-* 2>/dev/null || true
+dmesg | grep -Ei 'mmc|ext4|uart|serial|watchdog'
+ls -l /dev/mmcblk*
+ls -l /dev/watchdog*
+cat /proc/filesystems
+cat /proc/cmdline
+```
+
+输出：
+
+```text
+docs/E5_kernel_capability_matrix.md
+```
+
+## Step 2：建立 kernel config baseline
+
+如果当前使用厂商 kernel，请先保存：
+
+```text
+configs/kernel_vendor_baseline.config
+```
+
+如果 Buildroot 能接管 kernel 配置，请准备：
+
+```text
+configs/linux_kernel_edgeguard_e5_defconfig
+```
+
+但不要一步到位裁剪。先确保使用保存的 config 能重新构建并启动。
+
+## Step 3：最小 kernel capability 裁剪
+
+只围绕以下能力裁剪：
+
+```text
+MMC / SD
+EXT4
+UART console
+watchdog
+procfs / sysfs / devtmpfs
+RAUC 运行所需基础能力
+```
+
+每裁剪一次，都必须重新启动并验证：
+
+```sh
+cat /etc/edgeguard_version
+cat /etc/edgeguard_slot
+cat /proc/cmdline
+findmnt /
+mount | grep /data
+rauc status
+fw_printenv BOOT_ORDER
+fw_printenv BOOT_A_LEFT
+fw_printenv BOOT_B_LEFT
+dmesg | grep -Ei 'mmc|ext4|uart|serial|watchdog'
+```
+
+## Step 4：实现 health check
+
+实现：
+
+```text
+/usr/bin/edgeguard-health-check
+```
+
+最小检查项：
+
+* current slot；
+* rootfs 分区；
+* `/etc/edgeguard_version`;
+* `/etc/edgeguard_slot`;
+* `/proc/cmdline` 中的 `rauc.slot`;
+* `/data` 挂载；
+* `/data` 可写；
+* `rauc status` 可读；
+* `BOOT_ORDER` / `BOOT_A_LEFT` / `BOOT_B_LEFT` 可读；
+* 可选检查关键进程或测试服务。
+
+## Step 5：实现 boot success service
+
+实现：
+
+```text
+/etc/init.d/S99edgeguard-health
+```
+
+或 Buildroot init 脚本。
+
+逻辑：
+
+```text
+系统启动
+→ 等待 /data
+→ 运行 edgeguard-health-check
+→ 成功：rauc status mark-good
+→ 失败：记录日志，不 mark-good，reboot 或 mark-bad
+```
+
+注意：
+
+* E5 阶段可以先用 BusyBox init 脚本；
+* 不强制 systemd；
+* 不做复杂服务管理。
+
+## Step 6：实现 watchdog keeper
+
+实现：
+
+```text
+/usr/bin/edgeguard-watchdog-keeper
+```
+
+逻辑：
+
+```text
+打开 /dev/watchdog
+→ 周期性喂狗
+→ 只有 health check 通过后才持续喂狗
+→ 如果 health check 失败或卡住，则停止喂狗
+→ 等 watchdog reset
+```
+
+第一版可以拆成两个模式：
+
+```text
+模式 A：手动 watchdog 测试脚本
+模式 B：health check + watchdog keeper 联动
+```
+
+先做模式 A，再做模式 B。
+
+---
+
+# 十三、E5 kernel 裁剪边界
+
+你要帮我实现 kernel 裁剪，但必须遵守这些边界：
+
+## 必须保留
+
+* MMC / SD host controller；
+* MMC block device；
+* ext4 filesystem；
+* devtmpfs；
+* procfs；
+* sysfs；
+* UART driver；
+* serial console；
+* watchdog core；
+* i.MX6ULL watchdog driver；
+* U-Boot env 所需 MTD/MMC 访问能力，视我的环境而定；
+* RAUC 运行所需基础文件系统和设备节点能力；
+* `/data` ext4 挂载能力。
+
+## 可以考虑裁剪
+
+* 不用的网络驱动；
+* 不用的 USB 功能；
+* 不用的 sound；
+* 不用的 camera；
+* 不用的 GPU；
+* 不用的 Bluetooth；
+* 不用的 Wi-Fi；
+* 不用的 debug 选项；
+* 不用的 filesystem；
+* 不用的 input 子系统。
+
+## 第一轮不要裁剪
+
+* 不要裁掉 MMC；
+* 不要裁掉 ext4；
+* 不要裁掉 UART console；
+* 不要裁掉 watchdog；
+* 不要裁掉 procfs/sysfs/devtmpfs；
+* 不要裁掉启动日志相关能力；
+* 不要裁掉 RAUC 必需依赖。
+
+第一轮目标不是极限小，而是：
+
+```text
+关键能力清晰、配置可追踪、裁剪后 E1~E4 主链路仍可运行。
+```
+
+---
+
+# 十四、E5 最小交付物
+
+E5 完成时，至少要产出这些内容：
+
+```text
+edgeguard-ota/
+├── docs/
+│   ├── E5_watchdog_healthcheck_design.md
+│   ├── E5_health_check_policy.md
+│   ├── E5_watchdog_design.md
+│   ├── E5_kernel_capability_matrix.md
+│   ├── E5_kernel_trim_plan.md
+│   ├── E5_kernel_trim_validation.md
+│   └── E5_known_issues.md
+├── configs/
+│   ├── kernel_vendor_baseline.config
+│   ├── linux_kernel_edgeguard_e5_defconfig
+│   ├── kernel_config_diff_e5.txt
+│   ├── buildroot_defconfig_e5
+│   ├── rauc_system_e5.conf
+│   └── fw_env_e5_notes.txt
+├── board/
+│   └── edgeguard-imx6ull/
+│       └── overlay/
+│           ├── usr/
+│           │   └── bin/
+│           │       ├── edgeguard-health-check
+│           │       ├── edgeguard-watchdog-keeper
+│           │       ├── edgeguard-watchdog-test
+│           │       └── edgeguard-kernel-capability-check
+│           ├── etc/
+│           │   └── init.d/
+│           │       ├── S98edgeguard-watchdog
+│           │       └── S99edgeguard-health
+│           └── data/
+├── scripts/
+│   ├── backup_before_e5.sh
+│   ├── collect_kernel_config.sh
+│   ├── check_kernel_capabilities.sh
+│   ├── test_health_check_success.sh
+│   ├── test_health_check_fail.sh
+│   ├── test_watchdog_reset.sh
+│   ├── build_kernel_e5.sh
+│   └── collect_serial_log.sh
+├── reports/
+│   ├── E5_health_check_report.md
+│   ├── E5_watchdog_report.md
+│   ├── E5_kernel_trim_report.md
+│   └── logs/
+│       ├── E5_kernel_capability_before.log
+│       ├── E5_kernel_trim_boot.log
+│       ├── E5_health_success.log
+│       ├── E5_health_fail.log
+│       ├── E5_watchdog_feed_ok.log
+│       ├── E5_watchdog_no_feed_reset.log
+│       └── E5_after_watchdog_reboot.log
+└── README.md
+```
+
+---
+
+# 十五、health check 策略要求
+
+请帮我设计 `edgeguard-health-check`。
+
+最小检查项：
+
+```sh
+cat /etc/edgeguard_version
+cat /etc/edgeguard_slot
+cat /proc/cmdline
+findmnt /
+mount | grep /data
+test -w /data
+rauc status
+fw_printenv BOOT_ORDER
+fw_printenv BOOT_A_LEFT
+fw_printenv BOOT_B_LEFT
+```
+
+逻辑要求：
+
+* 根据 `/proc/cmdline` 判断当前 slot；
+* 检查 `rauc.slot=A/B` 是否存在；
+* 检查 `/etc/edgeguard_slot` 是否与 `rauc.slot` 一致；
+* 检查 `/` 是否来自正确 rootfs 分区；
+* 检查 `/data` 是否挂载；
+* 检查 `/data` 是否可写；
+* 检查 `rauc status` 是否能识别当前 booted slot；
+* 成功时 exit 0；
+* 失败时 exit 非 0；
+* 日志写入：
+
+```text
+/data/edgeguard/health/health-check.log
+```
+
+不要在 health check 里直接做复杂业务检查。第一版只做 OTA 可靠性相关检查。
+
+---
+
+# 十六、mark-good / mark-bad 策略要求
+
+请帮我设计 E5 的 mark 策略。
+
+## 成功路径
+
+```text
+新 slot 启动
+→ health check 成功
+→ rauc status mark-good
+→ BOOT_<slot>_LEFT 恢复
+→ 记录 health pass 日志
+```
+
+## 失败路径
+
+第一版允许两种策略，请帮我选择并说明取舍：
+
+### 策略 A：失败时不 mark-good，直接 reboot
+
+优点：
+
+* 简单；
+* 依赖 E4 的 BOOT_LEFT 机制消耗尝试次数；
+* 适合第一版。
+
+### 策略 B：失败时执行 mark-bad，然后 reboot
+
+优点：
+
+* 语义更明确；
+* 更接近 RAUC 状态管理。
+
+风险：
+
+* 需要确认 RAUC U-Boot backend 对 mark-bad 的行为；
+* 要避免误把 good slot 标坏。
+
+第一版建议优先采用策略 A，策略 B 作为增强验证。
+
+---
+
+# 十七、watchdog 设计要求
+
+请帮我设计三个脚本。
+
+## 1. edgeguard-watchdog-test
+
+目标：
+
+手动验证 `/dev/watchdog` 是否可用。
+
+模式：
+
+```text
+--feed       持续喂狗，系统不应 reset
+--no-feed    打开 watchdog 后停止喂狗，系统应 reset
+--info       打印 watchdog 设备和 dmesg 信息
+```
+
+## 2. edgeguard-watchdog-keeper
+
+目标：
+
+E5 正式 watchdog keeper。
+
+逻辑：
+
+```text
+启动
+→ 打开 /dev/watchdog
+→ 周期性检查 health flag
+→ health ok 时喂狗
+→ health fail 或 health timeout 时停止喂狗
+→ 等待 watchdog reset
+```
+
+## 3. S98edgeguard-watchdog
+
+目标：
+
+系统启动时启动 watchdog keeper。
+
+第一版可以不做后台 daemon，先做可控脚本实验。
+
+---
+
+# 十八、watchdog 验证实验要求
+
+请设计三个实验。
+
+## 实验 1：watchdog feed ok
+
+流程：
+
+```text
+启动系统
+→ 运行 watchdog keeper
+→ 正常喂狗 60 秒
+→ 系统不 reset
+```
+
+通过条件：
+
+```text
+系统持续在线
+串口日志无 reset
+/data 记录 feed 日志
+```
+
+## 实验 2：watchdog no-feed reset
+
+流程：
+
+```text
+启动系统
+→ 打开 /dev/watchdog
+→ 停止喂狗
+→ 等待 timeout
+→ 系统 reset
+```
+
+通过条件：
+
+```text
+串口出现重新启动日志
+U-Boot 重新运行
+Linux 重新启动
+```
+
+## 实验 3：health fail + watchdog reset + U-Boot fallback
+
+流程：
+
+```text
+OTA 到新 slot
+→ 新 slot 启动
+→ health check 故意失败或卡住
+→ watchdog 不再喂狗
+→ 系统 reset
+→ U-Boot 消耗 BOOT_<slot>_LEFT
+→ 最终 fallback 到 old good slot
+```
+
+通过条件：
+
+```text
+health fail 可观察
+watchdog reset 可观察
+BOOT_LEFT 消耗可观察
+fallback 到旧槽可观察
+```
+
+---
+
+# 十九、kernel capability matrix 要求
+
+请帮我建立 `docs/E5_kernel_capability_matrix.md`，至少包含：
+
+```text
+Capability | Kernel config | Runtime evidence | Required by | Status
+MMC block | CONFIG_MMC / platform host driver | /dev/mmcblk0p2 / dmesg | rootfs A/B | PASS/FAIL
+EXT4 | CONFIG_EXT4_FS | findmnt /, findmnt /data | rootfs/data | PASS/FAIL
+UART console | serial driver + console support | kernel log on serial | logs/debug | PASS/FAIL
+Watchdog | CONFIG_WATCHDOG + SoC driver | /dev/watchdog | E5 reset | PASS/FAIL
+procfs | CONFIG_PROC_FS | /proc/cmdline | slot detect | PASS/FAIL
+sysfs | CONFIG_SYSFS | /sys exists | device visibility | PASS/FAIL
+devtmpfs | CONFIG_DEVTMPFS | /dev/mmcblk0 exists | boot device nodes | PASS/FAIL
+```
+
+每个能力都必须有 runtime evidence，不允许只写“已启用”。
+
+---
+
+# 二十、kernel 配置和裁剪命令要求
+
+请根据 Buildroot 和当前厂商 kernel 情况给出两条路线。
+
+## 路线 A：Buildroot 接管 kernel 构建
+
+需要给出：
+
+```sh
+make linux-menuconfig
+make linux-update-defconfig
+make
+```
+
+并说明：
+
+* kernel config 保存在哪里；
+* 如何提交 Git；
+* 如何回滚；
+* 如何保存 config diff。
+
+## 路线 B：厂商 kernel 独立构建
+
+需要给出：
+
+```sh
+make ARCH=arm menuconfig
+make ARCH=arm savedefconfig
+make ARCH=arm zImage dtbs modules
+```
+
+并说明：
+
+* 如何使用交叉编译器；
+* 如何保存 defconfig；
+* 如何替换 SD 卡 boot 分区里的 kernel/dtb；
+* 如何保留旧 kernel 作为 fallback。
+
+如果我的项目当前仍使用厂商 kernel，请优先从路线 B 开始，但可以规划后续迁入 Buildroot。
+
+---
+
+# 二十一、kernel 裁剪验证要求
+
+每次修改 kernel config 后，都必须执行：
+
+```sh
+cat /etc/edgeguard_version
+cat /etc/edgeguard_slot
+cat /proc/cmdline
+findmnt /
+mount | grep /data
+rauc status
+fw_printenv BOOT_ORDER
+fw_printenv BOOT_A_LEFT
+fw_printenv BOOT_B_LEFT
+ls -l /dev/mmcblk*
+ls -l /dev/watchdog*
+dmesg | grep -Ei 'mmc|ext4|uart|serial|watchdog|rauc'
+```
+
+还必须验证：
+
+```text
+A 槽可启动
+B 槽可启动
+/data 可挂载
+RAUC status 可用
+mark-good 可用
+watchdog 可触发 reset
+串口日志可采集
+```
+
+---
+
+# 二十二、E5 技术设计草图要求
+
+请用 ASCII 图画出 E5 的完整关系。
+
+要求包含：
+
+```text
+new slot boot
+→ health check
+→ mark-good
+→ watchdog feed
+→ health fail
+→ watchdog reset
+→ U-Boot BOOT_LEFT fallback
+→ old good slot
+```
+
+同时画出 kernel capability 关系：
+
+```text
+Kernel
+├── MMC → rootfs_A/rootfs_B/data
+├── EXT4 → rootfs/data mount
+├── UART → serial log
+└── Watchdog → /dev/watchdog reset
+```
+
+---
+
+# 二十三、E5 最小验证实验重新定义
+
+请把 E5 拆成以下实验。
+
+## 实验 1：kernel capability inventory
+
+目标：
+
+确认当前 kernel 能力现状。
+
+输出：
+
+```text
+E5_kernel_capability_before.log
+E5_kernel_capability_matrix.md
+```
+
+## 实验 2：kernel 裁剪后启动验证
+
+目标：
+
+裁剪后系统仍可启动并保持 E1~E4 能力。
+
+输出：
+
+```text
+E5_kernel_trim_boot.log
+E5_kernel_trim_report.md
+```
+
+## 实验 3：health check 成功 mark-good
+
+目标：
+
+新 slot 启动后 health check 成功并 mark-good。
+
+输出：
+
+```text
+E5_health_success.log
+```
+
+## 实验 4：health check 失败不 mark-good
+
+目标：
+
+构造 health fail，确认不 mark-good，并触发 reboot 或 fallback。
+
+输出：
+
+```text
+E5_health_fail.log
+```
+
+## 实验 5：watchdog 正常喂狗
+
+目标：
+
+keeper 正常喂狗，系统不 reset。
+
+输出：
+
+```text
+E5_watchdog_feed_ok.log
+```
+
+## 实验 6：watchdog 停止喂狗 reset
+
+目标：
+
+停止喂狗，系统 reset。
+
+输出：
+
+```text
+E5_watchdog_no_feed_reset.log
+```
+
+## 实验 7：health fail + watchdog + E4 fallback
+
+目标：
+
+完整验证：
+
+```text
+新槽启动
+→ health fail 或卡死
+→ watchdog reset
+→ BOOT_LEFT 消耗
+→ fallback 旧槽
+```
+
+输出：
+
+```text
+E5_health_watchdog_fallback_report.md
+```
+
+---
+
+# 二十四、E5 常见坑和排查要求
+
+请你告诉我 E5 最可能卡在哪里，并给出排查顺序。
+
+至少包括：
+
+## 1. `/dev/watchdog` 不存在
+
+排查：
+
+* kernel 是否启用 watchdog core；
+* 是否启用 i.MX watchdog driver；
+* device tree 是否包含 watchdog 节点；
+* dmesg 是否有 watchdog；
+* `/dev` 是否有 devtmpfs。
+
+## 2. 打开 watchdog 后系统立刻 reset
+
+排查：
+
+* timeout 是否太短；
+* keeper 是否正常喂狗；
+* nowayout 是否启用；
+* 脚本是否退出导致停止喂狗；
+* watchdog magic close 行为是否生效。
+
+## 3. health check 成功但 mark-good 失败
+
+排查：
+
+* RAUC bootloader backend 是否为 uboot；
+* `fw_setenv` 是否可用；
+* `BOOT_ORDER` 是否可读写；
+* `BOOT_A_LEFT` / `BOOT_B_LEFT` 是否存在；
+* 当前 `rauc.slot` 是否正确。
+
+## 4. kernel 裁剪后无法启动
+
+排查：
+
+* MMC 是否被裁掉；
+* ext4 是否被裁掉；
+* rootfs 分区号是否变化；
+* devtmpfs 是否启用；
+* serial console 是否被裁掉；
+* dtb 是否匹配；
+* 是否可以换回旧 kernel。
+
+## 5. 裁剪后无串口日志
+
+排查：
+
+* UART driver；
+* serial console；
+* console=ttymxc0,115200；
+* U-Boot bootargs；
+* kernel config；
+* device tree pinctrl。
+
+## 6. `/data` 无法挂载
+
+排查：
+
+* ext4；
+* 分区是否存在；
+* fstab；
+* mount 脚本；
+* MMC block；
+* fsck。
+
+## 7. watchdog reset 后没有 fallback
+
+排查：
+
+* E4 BOOT_LEFT 是否被消耗；
+* reboot 是否经过 U-Boot；
+* health check 是否误 mark-good；
+* mark-good 是否过早执行；
+* BOOT_ORDER 是否被改错。
+
+---
+
+# 二十五、E5 延期降级策略
+
+如果我时间不够，请你告诉我如何降级。
+
+最低保留：
+
+* health check 脚本；
+* health check 成功后 mark-good；
+* health check 失败不 mark-good；
+* watchdog 手动 no-feed reset；
+* kernel capability matrix；
+* MMC/ext4/UART/watchdog runtime evidence；
+* 一份 E5 报告。
+
+可以暂时砍掉：
+
+* kernel 深度裁剪；
+* watchdog daemon 常驻化；
+* mark-bad 策略；
+* health fail + watchdog + fallback 全自动链路；
+* Buildroot 完整接管 kernel；
+* 多轮压力测试；
+* 掉电测试。
+
+如果 kernel 裁剪卡住，降级为：
+
+```text
+E5 只完成 kernel capability inventory 和最小 watchdog config 确认。
+深度裁剪推迟到 E7 或单独附录。
+```
+
+---
+
+# 二十六、E5 完成后如何进入 E6
+
+请最后告诉我做到哪些条件可以进入 E6。
+
+E6 的入口条件至少包括：
+
+* E4 RAUC + U-Boot fallback 仍然可用；
+* health check 脚本可运行；
+* health check 成功可 mark-good；
+* health check 失败不会误 mark-good；
+* watchdog 可用；
+* 不喂狗能 reset；
+* reset 后能重新进入 U-Boot；
+* kernel capability matrix 已完成；
+* MMC/ext4/UART/watchdog 已有 runtime evidence；
+* 裁剪后的 kernel 或 baseline kernel 已归档；
+* E5 报告已完成；
+* 串口日志已保存；
+* 已提交 Git。
+
+E6 再开始做随机掉电测试台，不要在 E5 提前做电源继电器和随机掉电。
+
+---
+
+# 二十七、请你现在开始执行
+
+请按上面的要求，直接给我 E5 的第一轮执行方案。
+
+默认信息：
+
+* 目标板：i.MX6ULL 真实开发板；
+* 当前 E1 已完成；
+* 当前 E2 已完成；
+* 当前 E3 已完成；
+* 当前 E4 已完成；
+* 当前 A 槽设备是 `/dev/mmcblk0p2`；
+* 当前 B 槽设备是 `/dev/mmcblk0p3`；
+* data 分区是 `/dev/mmcblk0p4`；
+* RAUC 可用；
+* RAUC 已使用 `bootloader=uboot`；
+* U-Boot 使用 `BOOT_ORDER`；
+* U-Boot 使用 `BOOT_A_LEFT` / `BOOT_B_LEFT`；
+* 真正的 bad boot rollback 已通过；
+* 坏 B 槽多次启动失败后，BOOT_B_LEFT 被消耗到 0，U-Boot 自动回到旧 good A 槽；
+* `fw_printenv` / `fw_setenv` Linux 侧可用；
+* 当前项目希望在 E5 中加入 Linux kernel 关键能力裁剪与验证；
+* kernel 裁剪必须围绕 MMC、ext4、UART、watchdog 等 OTA 必需能力；
+* E5 不做随机掉电；
+* E5 不做云平台；
+* E5 不做 Web UI；
+* E5 不做多设备管理。

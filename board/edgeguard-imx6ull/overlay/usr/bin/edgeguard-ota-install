@@ -1,0 +1,61 @@
+#!/bin/sh
+set -eu
+
+BUNDLE="${1:-}"
+
+if [ -z "$BUNDLE" ]; then
+  echo "Usage: $0 /path/to/update.raucb" >&2
+  exit 2
+fi
+
+if [ ! -f "$BUNDLE" ]; then
+  echo "ERROR: bundle not found: $BUNDLE" >&2
+  exit 1
+fi
+
+echo "EdgeGuard OTA install with RAUC U-Boot backend"
+echo "Bundle: $BUNDLE"
+
+echo
+echo "[runtime]"
+cat /proc/cmdline
+cat /etc/edgeguard_version 2>/dev/null || true
+cat /etc/edgeguard_slot 2>/dev/null || true
+
+echo
+echo "[rauc config]"
+cat /etc/rauc/system.conf
+
+echo
+echo "[rauc status before install]"
+rauc status --detailed || true
+
+echo
+echo "[uboot state before install]"
+fw_printenv BOOT_ORDER || true
+fw_printenv BOOT_A_LEFT || true
+fw_printenv BOOT_B_LEFT || true
+fw_printenv bootcount || true
+fw_printenv bootlimit || true
+fw_printenv upgrade_available || true
+
+echo
+echo "[precheck]"
+test -f /etc/fw_env.config
+rauc info "$BUNDLE" >/dev/null
+
+echo
+echo "[install]"
+rauc install "$BUNDLE"
+
+echo
+echo "[uboot state after install]"
+fw_printenv BOOT_ORDER || true
+fw_printenv BOOT_A_LEFT || true
+fw_printenv BOOT_B_LEFT || true
+
+echo
+echo "Install done. With activate-installed=true, RAUC should have activated the installed slot."
+echo "Rebooting..."
+sync
+reboot
