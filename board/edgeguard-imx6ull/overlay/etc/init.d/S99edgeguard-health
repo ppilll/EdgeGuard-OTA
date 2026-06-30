@@ -1,0 +1,102 @@
+#!/bin/sh
+
+HDIR="/data/edgeguard/health"
+LOG="$HDIR/health-service.log"
+
+ts() {
+    date '+%Y-%m-%dT%H:%M:%S%z'
+}
+
+log() {
+    mkdir -p "$HDIR" 2>/dev/null || true
+    echo "$(ts) $*" >> "$LOG" 2>/dev/null || echo "$(ts) $*"
+}
+
+wait_data() {
+    i=0
+    while [ "$i" -lt 30 ]; do
+        if findmnt -n /data >/dev/null 2>&1 || mount | grep -q ' on /data '; then
+            return 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    return 1
+}
+
+reboot_without_mark_good() {
+    reason="$1"
+    log "reboot_without_mark_good: $reason"
+    sync
+    sleep 2
+    reboot
+    sleep 5
+    reboot -f
+}
+
+case "$1" in
+    start)
+        mkdir -p "$HDIR" 2>/dev/null || true
+        log "===== S99edgeguard-health start ====="
+
+        if ! wait_data; then
+            reboot_without_mark_good "/data not mounted after wait"
+            exit 1
+        fi
+
+        if /usr/bin/edgeguard-health-check; then
+            log "health check PASS, now mark-good booted"
+
+            if rauc status mark-good booted >> "$LOG" 2>&1; then
+                log "rauc status mark-good booted PASS"
+                fw_printenv BOOT_ORDER BOOT_A_LEFT BOOT_B_LEFT >> "$LOG" 2>&1 || true
+                echo "[S99edgeguard-health] PASS: ALL Check have been passed."
+                mkdir -p /run/edgeguard 2>/dev/null || true
+                touch /run/edgeguard/health.ok
+                rm -f /run/edgeguard/health.fail
+                sync
+                exit 0
+            else
+                log "rauc status mark-good booted FAIL"
+                fw_printenv BOOT_ORDER BOOT_A_LEFT BOOT_B_LEFT >> "$LOG" 2>&1 || true
+                echo "[S99edgeguard-health] FAIL: mark-good failed after health pass."
+                reboot_without_mark_good "mark-good failed after health pass"
+                exit 1
+            fi
+        else
+            mkdir -p /run/edgeguard 2>/dev/null || true
+            touch /run/edgeguard/health.fail
+            rm -f /run/edgeguard/health.ok
+
+            if [ -f /data/edgeguard/health/use_watchdog_on_fail ] && [ -f /run/edgeguard/watchdog.ready ]; then
+                log "health check FAIL, watchdog integration mode enabled; do not reboot manually"
+                echo "[S99edgeguard-health] FAIL: watchdog integration mode enabled; do not reboot manually."
+                sync
+                while true; do
+                    sleep 5
+                    log "waiting for watchdog reset after health fail"
+                    sync
+                done
+            else
+                log "health check FAIL, do not mark-good, reboot directly"
+                fw_printenv BOOT_ORDER BOOT_A_LEFT BOOT_B_LEFT >> "$LOG" 2>&1 || true
+                echo "[S99edgeguard-health] FAIL: health check FAIL, do not mark-good, reboot directly."
+                reboot_without_mark_good "health check failed"
+            fi
+        fi
+        ;;
+
+    stop)
+        log "stop requested: no daemon to stop in E5 first version"
+        exit 0
+        ;;
+
+    restart|reload)
+        "$0" start
+        ;;
+
+    *)
+        echo "Usage: $0 {start|stop|restart|reload}"
+        exit 1
+        ;;
+esac

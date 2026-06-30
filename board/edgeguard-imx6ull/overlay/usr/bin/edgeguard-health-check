@@ -1,0 +1,173 @@
+#!/bin/sh
+
+HDIR="/data/edgeguard/health"
+TMPDIR="/tmp/edgeguard-health"
+mkdir -p "$HDIR" 2>/dev/null || mkdir -p "$TMPDIR"
+
+if [ -d "$HDIR" ]; then
+    LOG="$HDIR/health-check.log"
+    LAST="$HDIR/health-check-last.env"
+    SLOT_ENV="$HDIR/current-slot-last.env"
+    RAUC_LOG="$HDIR/rauc-status-last.log"
+else
+    LOG="$TMPDIR/health-check.log"
+    LAST="$TMPDIR/health-check-last.env"
+    SLOT_ENV="$TMPDIR/current-slot-last.env"
+    RAUC_LOG="$TMPDIR/rauc-status-last.log"
+fi
+
+ts() {
+    date '+%Y-%m-%dT%H:%M:%S%z'
+}
+
+log() {
+    echo "$(ts) $*"
+}
+
+FAILS=0
+
+fail() {
+    FAILS=$((FAILS + 1))
+    log "FAIL: $*"
+}
+
+pass() {
+    log "PASS: $*"
+}
+
+write_last() {
+    result="$1"
+    {
+        echo "EDGEGUARD_HEALTH_RESULT=$result"
+        echo "EDGEGUARD_HEALTH_TIME=$(ts)"
+        echo "EDGEGUARD_HEALTH_FAILS=$FAILS"
+        echo "EDGEGUARD_SLOT=${EDGEGUARD_SLOT:-UNKNOWN}"
+        echo "EDGEGUARD_EXPECTED_ROOTFS=${EDGEGUARD_EXPECTED_ROOTFS:-UNKNOWN}"
+        echo "EDGEGUARD_ROOT_SOURCE=${EDGEGUARD_ROOT_SOURCE:-UNKNOWN}"
+        echo "EDGEGUARD_ROOT_ARG=${EDGEGUARD_ROOT_ARG:-UNKNOWN}"
+        echo "EDGEGUARD_VERSION=${EDGEGUARD_VERSION:-UNKNOWN}"
+    } > "$LAST" 2>/dev/null || true
+}
+
+{
+    log "===== edgeguard-health-check start ====="
+
+    if ! /usr/bin/edgeguard-current-slot > "$SLOT_ENV" 2>&1; then
+        cat "$SLOT_ENV" 2>/dev/null || true
+        fail "edgeguard-current-slot failed or rootfs mismatch"
+    fi
+
+    # shellcheck disable=SC1090
+    . "$SLOT_ENV" 2>/dev/null || fail "cannot source current-slot env"
+
+    log "slot=$EDGEGUARD_SLOT root_source=$EDGEGUARD_ROOT_SOURCE expected=$EDGEGUARD_EXPECTED_ROOTFS root_match=$EDGEGUARD_ROOT_MATCH"
+
+    if [ "$EDGEGUARD_ROOT_MATCH" = "yes" ]; then
+        pass "rootfs source matches current slot"
+    else
+        fail "rootfs source does not match current slot"
+    fi
+
+    # Force-fail support for later experiments.
+    # Recommended: use force_fail_A or force_fail_B to avoid failing the old good slot through shared /data.
+    if [ -f "$HDIR/force_fail_$EDGEGUARD_SLOT" ]; then
+        fail "force_fail_$EDGEGUARD_SLOT exists"
+    fi
+
+    if [ -f "$HDIR/force_fail" ]; then
+        ff="$(cat "$HDIR/force_fail" 2>/dev/null | tr -d ' \t\r\n')"
+        case "$ff" in
+            "$EDGEGUARD_SLOT"|ALL|all|"")
+                fail "force_fail triggered for slot=$EDGEGUARD_SLOT value=$ff"
+                ;;
+            *)
+                log "force_fail exists but does not target current slot: value=$ff"
+                ;;
+        esac
+    fi
+
+    if grep -q 'rauc.slot=' /proc/cmdline 2>/dev/null; then
+        pass "/proc/cmdline contains rauc.slot"
+    else
+        fail "/proc/cmdline does not contain rauc.slot"
+    fi
+
+    if [ -r /etc/edgeguard_version ]; then
+        EDGEGUARD_VERSION="$(cat /etc/edgeguard_version 2>/dev/null | head -n 1)"
+        if [ -n "$EDGEGUARD_VERSION" ]; then
+            pass "/etc/edgeguard_version readable: $EDGEGUARD_VERSION"
+        else
+            fail "/etc/edgeguard_version is empty"
+        fi
+    else
+        fail "/etc/edgeguard_version not readable"
+    fi
+
+    if findmnt -n / >/dev/null 2>&1; then
+        pass "findmnt / works"
+    else
+        fail "findmnt / failed"
+    fi
+
+    if findmnt -n /data >/dev/null 2>&1 || mount | grep -q ' on /data '; then
+        pass "/data is mounted"
+    else
+        fail "/data is not mounted"
+    fi
+
+    if tmpfile="$HDIR/.health-write-test.$$" && echo "edgeguard-health-write-test" > "$tmpfile" 2>/dev/null; then
+        rm -f "$tmpfile"
+        pass "/data is writable"
+    else
+        fail "/data is not writable"
+    fi
+
+    if rauc status --detailed > "$RAUC_LOG" 2>&1; then
+        pass "rauc status --detailed works"
+    elif rauc status > "$RAUC_LOG" 2>&1; then
+        pass "rauc status works, but --detailed failed"
+    else
+        cat "$RAUC_LOG" 2>/dev/null || true
+        fail "rauc status failed"
+    fi
+
+    case "$EDGEGUARD_SLOT" in
+        A)
+            if grep -Eiq '(Booted from:.*(rootfs\.0|A)|rootfs\.0.*booted|rootfs\.0.*\[booted\]|A.*booted)' "$RAUC_LOG"; then
+                pass "RAUC booted slot appears to match A/rootfs.0"
+            else
+                fail "RAUC booted slot does not clearly match A/rootfs.0"
+            fi
+            ;;
+        B)
+            if grep -Eiq '(Booted from:.*(rootfs\.1|B)|rootfs\.1.*booted|rootfs\.1.*\[booted\]|B.*booted)' "$RAUC_LOG"; then
+                pass "RAUC booted slot appears to match B/rootfs.1"
+            else
+                fail "RAUC booted slot does not clearly match B/rootfs.1"
+            fi
+            ;;
+        *)
+            fail "unknown EDGEGUARD_SLOT=$EDGEGUARD_SLOT"
+            ;;
+    esac
+
+    for var in BOOT_ORDER BOOT_A_LEFT BOOT_B_LEFT; do
+        if fw_printenv "$var" >/tmp/edgeguard-fwenv-"$var".log 2>&1; then
+            pass "fw_printenv $var readable: $(cat /tmp/edgeguard-fwenv-"$var".log)"
+        else
+            cat /tmp/edgeguard-fwenv-"$var".log 2>/dev/null || true
+            fail "fw_printenv $var failed"
+        fi
+    done
+
+    if [ "$FAILS" -eq 0 ]; then
+        write_last PASS
+        log "===== edgeguard-health-check PASS ====="
+        exit 0
+    fi
+
+    write_last FAIL
+    log "===== edgeguard-health-check FAIL count=$FAILS ====="
+    exit 1
+
+} >> "$LOG" 2>&1

@@ -1,0 +1,53 @@
+#!/bin/sh
+
+RUNDIR="/run/edgeguard"
+LOG="/data/edgeguard/watchdog/watchdog-service.log"
+PIDFILE="$RUNDIR/watchdog-keeper.pid"
+ENABLE_FILE="/data/edgeguard/watchdog/enable_keeper"
+
+mkdir -p "$RUNDIR" /data/edgeguard/watchdog 2>/dev/null || true
+
+ts() {
+    date '+%Y-%m-%dT%H:%M:%S%z'
+}
+
+log() {
+    echo "$(ts) $*" >> "$LOG"
+}
+
+case "$1" in
+    start)
+        log "===== S98edgeguard-watchdog start ====="
+
+        if [ ! -f "$ENABLE_FILE" ]; then
+            log "watchdog keeper disabled; create $ENABLE_FILE to enable"
+            echo "[S98edgeguard-watchdog] FAIL: watchdog keeper disabled; create $ENABLE_FILE to enable."
+            exit 0
+        fi
+
+        if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+            log "watchdog keeper already running pid=$(cat "$PIDFILE")"
+            exit 0
+        fi
+
+        /usr/bin/edgeguard-watchdog-keeper &
+        echo "$!" > "$PIDFILE"
+        log "watchdog keeper started pid=$(cat "$PIDFILE")"
+        echo "[S98edgeguard-watchdog] watchdog keeper started pid=$(cat "$PIDFILE")."
+        exit 0
+        ;;
+
+    stop)
+        log "stop requested; not stopping watchdog keeper in test mode"
+        exit 0
+        ;;
+
+    restart|reload)
+        "$0" start
+        ;;
+
+    *)
+        echo "Usage: $0 {start|stop|restart|reload}"
+        exit 1
+        ;;
+esac

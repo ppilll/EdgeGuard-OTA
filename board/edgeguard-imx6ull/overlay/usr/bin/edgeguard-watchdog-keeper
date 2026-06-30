@@ -1,0 +1,90 @@
+#!/bin/sh
+
+RUNDIR="/run/edgeguard"
+HDIR="/data/edgeguard/health"
+WDIR="/data/edgeguard/watchdog"
+LOG="$WDIR/watchdog-keeper.log"
+
+mkdir -p "$RUNDIR" "$HDIR" "$WDIR" 2>/dev/null || true
+
+WATCHDOG_DEV="${EDGEGUARD_WATCHDOG_DEV:-/dev/watchdog}"
+FEED_INTERVAL="${EDGEGUARD_WATCHDOG_FEED_INTERVAL:-5}"
+HEALTH_TIMEOUT="${EDGEGUARD_HEALTH_TIMEOUT:-120}"
+
+ts() {
+    date '+%Y-%m-%dT%H:%M:%S%z'
+}
+
+log() {
+    echo "$(ts) $*" >> "$LOG"
+}
+
+health_ok_file="$RUNDIR/health.ok"
+health_fail_file="$RUNDIR/health.fail"
+keeper_ready_file="$RUNDIR/watchdog.ready"
+
+rm -f "$health_ok_file" "$health_fail_file" "$keeper_ready_file"
+
+if [ ! -e "$WATCHDOG_DEV" ]; then
+    log "FAIL: watchdog device not found: $WATCHDOG_DEV"
+    exit 1
+fi
+
+log "===== edgeguard-watchdog-keeper start ====="
+log "dev=$WATCHDOG_DEV feed_interval=$FEED_INTERVAL health_timeout=$HEALTH_TIMEOUT"
+
+exec 3>"$WATCHDOG_DEV" || {
+    log "FAIL: cannot open $WATCHDOG_DEV"
+    exit 1
+}
+
+echo 1 >&3 2>/dev/null || {
+    log "FAIL: initial watchdog feed failed"
+    exit 1
+}
+
+touch "$keeper_ready_file"
+start="$(date +%s)"
+
+while true; do
+    now="$(date +%s)"
+    elapsed=$((now - start))
+
+    if [ -f "$health_ok_file" ]; then
+        log "health.ok observed; keep feeding watchdog"
+        echo 1 >&3 2>/dev/null || {
+            log "FAIL: watchdog feed failed after health.ok"
+            exit 1
+        }
+        sleep "$FEED_INTERVAL"
+        continue
+    fi
+
+    if [ -f "$health_fail_file" ]; then
+        log "health.fail observed; stop feeding watchdog and wait for reset"
+        sync
+        while true; do
+            sleep 5
+            log "waiting for watchdog reset after health.fail"
+            sync
+        done
+    fi
+
+    if [ "$elapsed" -ge "$HEALTH_TIMEOUT" ]; then
+        log "health timeout elapsed=${elapsed}s; stop feeding watchdog and wait for reset"
+        sync
+        while true; do
+            sleep 5
+            log "waiting for watchdog reset after health timeout"
+            sync
+        done
+    fi
+
+    log "health pending elapsed=${elapsed}s; feed watchdog"
+    echo 1 >&3 2>/dev/null || {
+        log "FAIL: watchdog feed failed while health pending"
+        exit 1
+    }
+
+    sleep "$FEED_INTERVAL"
+done

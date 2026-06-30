@@ -1,0 +1,198 @@
+#!/bin/sh
+
+LOG_DIR="/data/edgeguard/watchdog/logs"
+mkdir -p "$LOG_DIR" 2>/dev/null || LOG_DIR="/tmp"
+
+LOG="$LOG_DIR/E5_watchdog_test.log"
+
+ts() {
+    date '+%Y-%m-%dT%H:%M:%S%z'
+}
+
+log() {
+    echo "$(ts) $*" | tee -a "$LOG"
+}
+
+pick_dev() {
+    if [ -n "${EDGEGUARD_WATCHDOG_DEV:-}" ]; then
+        echo "$EDGEGUARD_WATCHDOG_DEV"
+    elif [ -e /dev/watchdog ]; then
+        echo /dev/watchdog
+    elif [ -e /dev/watchdog0 ]; then
+        echo /dev/watchdog0
+    else
+        echo ""
+    fi
+}
+
+get_timeout() {
+    t="$(cat /sys/class/watchdog/watchdog0/timeout 2>/dev/null || true)"
+
+    case "$t" in
+        ''|*[!0-9]*)
+            t="$(dmesg | sed -n 's/.*imx2-wdt.*timeout \([0-9][0-9]*\) sec.*/\1/p' | tail -n 1)"
+            ;;
+    esac
+
+    case "$t" in
+        ''|*[!0-9]*) echo 60 ;;
+        *) echo "$t" ;;
+    esac
+}
+
+usage() {
+    cat <<USAGE
+Usage:
+  edgeguard-watchdog-test --info
+  edgeguard-watchdog-test --feed [duration_sec] [interval_sec]
+  edgeguard-watchdog-test --no-feed [wait_sec]
+
+Examples:
+  edgeguard-watchdog-test --info
+  edgeguard-watchdog-test --feed 60 5
+  edgeguard-watchdog-test --no-feed 90
+
+Notes:
+  --feed opens watchdog and keeps feeding it, then tries magic close.
+  --no-feed opens watchdog and intentionally stops feeding it.
+  Do not run --no-feed from boot scripts.
+USAGE
+}
+
+info() {
+    log "===== watchdog info start ====="
+
+    dev="$(pick_dev)"
+    echo "device=$dev" | tee -a "$LOG"
+
+    ls -l /dev/watchdog* 2>&1 | tee -a "$LOG" || true
+
+    echo "===== /sys/class/watchdog =====" | tee -a "$LOG"
+    ls -l /sys/class/watchdog 2>&1 | tee -a "$LOG" || true
+
+    echo "===== watchdog0 real path =====" | tee -a "$LOG"
+    readlink -f /sys/class/watchdog/watchdog0 2>&1 | tee -a "$LOG" || true
+
+    for f in \
+      /sys/class/watchdog/watchdog0/identity \
+      /sys/class/watchdog/watchdog0/status \
+      /sys/class/watchdog/watchdog0/bootstatus \
+      /sys/class/watchdog/watchdog0/state \
+      /sys/class/watchdog/watchdog0/timeout \
+      /sys/class/watchdog/watchdog0/timeleft \
+      /sys/class/watchdog/watchdog0/nowayout
+    do
+        echo "===== $f =====" | tee -a "$LOG"
+        if [ -e "$f" ]; then
+            cat "$f" 2>&1 | tee -a "$LOG" || true
+        else
+            echo "WARN: missing" | tee -a "$LOG"
+        fi
+    done
+
+    echo "===== dmesg watchdog =====" | tee -a "$LOG"
+    dmesg | grep -Ei 'watchdog|imx2-wdt|wdt' 2>&1 | tee -a "$LOG" || true
+
+    echo "detected_timeout=$(get_timeout)" | tee -a "$LOG"
+
+    log "===== watchdog info end ====="
+}
+
+feed_test() {
+    dev="$(pick_dev)"
+    duration="${1:-60}"
+    interval="${2:-5}"
+
+    if [ -z "$dev" ] || [ ! -e "$dev" ]; then
+        log "FAIL: watchdog device not found"
+        exit 1
+    fi
+
+    log "===== watchdog feed test start ====="
+    log "dev=$dev duration=${duration}s interval=${interval}s"
+
+    exec 3>"$dev" || {
+        log "FAIL: cannot open $dev"
+        exit 1
+    }
+
+    elapsed=0
+    while [ "$elapsed" -lt "$duration" ]; do
+        echo 1 >&3 || {
+            log "FAIL: watchdog feed write failed"
+            exit 1
+        }
+        log "feed ok elapsed=${elapsed}s"
+        sleep "$interval"
+        elapsed=$((elapsed + interval))
+    done
+
+    # Magic close attempt. If the driver supports magic close and nowayout=0,
+    # this should disable watchdog on close. If unsupported, behavior is driver-specific.
+    echo V >&3 2>/dev/null || true
+    exec 3>&-
+
+    log "===== watchdog feed test end: system should not have reset ====="
+    exit 0
+}
+
+no_feed_test() {
+    dev="$(pick_dev)"
+    timeout="$(get_timeout)"
+    wait_sec="${1:-$((timeout + 30))}"
+
+    if [ -z "$dev" ] || [ ! -e "$dev" ]; then
+        log "FAIL: watchdog device not found"
+        exit 1
+    fi
+
+    log "===== watchdog no-feed test start ====="
+    log "dev=$dev timeout=${timeout}s wait_sec=${wait_sec}s"
+    log "Opening watchdog now. System is expected to reset before this script finishes."
+
+    sync
+
+    exec 3>"$dev" || {
+        log "FAIL: cannot open $dev"
+        exit 1
+    }
+
+    # One initial write ensures the device path is active and log is flushed.
+    echo 1 >&3 2>/dev/null || true
+    log "watchdog opened and initial ping sent; now intentionally not feeding"
+
+    i=0
+    while [ "$i" -lt "$wait_sec" ]; do
+        sleep 5
+        i=$((i + 5))
+        log "no-feed elapsed=${i}s; waiting for watchdog reset"
+        sync
+    done
+
+    log "ERROR: watchdog did not reset system within ${wait_sec}s"
+    log "Attempting magic close to avoid an unexpected delayed reset"
+    echo V >&3 2>/dev/null || true
+    exec 3>&-
+    exit 2
+}
+
+case "${1:-}" in
+    --info)
+        info
+        ;;
+    --feed)
+        shift
+        feed_test "$@"
+        ;;
+    --no-feed)
+        shift
+        no_feed_test "$@"
+        ;;
+    -h|--help|"")
+        usage
+        ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac

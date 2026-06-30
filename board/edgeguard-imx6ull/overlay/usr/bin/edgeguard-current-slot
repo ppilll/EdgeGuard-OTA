@@ -1,19 +1,83 @@
 #!/bin/sh
+set -u
 
-CMDLINE="$(cat /proc/cmdline)"
+A_DEV="${EDGEGUARD_A_DEV:-/dev/mmcblk0p2}"
+B_DEV="${EDGEGUARD_B_DEV:-/dev/mmcblk0p3}"
 
-case "$CMDLINE" in
-  *"rauc.slot=A"*)
-    echo "SLOT=A"
-    echo "ROOTFS=/dev/mmcblk0p2"
-    ;;
-  *"rauc.slot=B"*)
-    echo "SLOT=B"
-    echo "ROOTFS=/dev/mmcblk0p3"
-    ;;
-  *)
-    echo "SLOT=unknown"
-    echo "CMDLINE=$CMDLINE"
-    exit 1
-    ;;
+canon_dev() {
+    if [ -n "${1:-}" ]; then
+        r="$(readlink -f "$1" 2>/dev/null || true)"
+        if [ -n "$r" ]; then
+            printf '%s\n' "$r"
+        else
+            printf '%s\n' "$1"
+        fi
+    else
+        printf '\n'
+    fi
+}
+
+cmdline="$(cat /proc/cmdline 2>/dev/null || true)"
+slot_raw=""
+root_arg=""
+
+for x in $cmdline; do
+    case "$x" in
+        rauc.slot=*) slot_raw="${x#rauc.slot=}" ;;
+        root=*) root_arg="${x#root=}" ;;
+    esac
+done
+
+case "$slot_raw" in
+    A|rootfs.0|system0)
+        slot="A"
+        expected="$A_DEV"
+        expected_rauc_slot="rootfs.0"
+        ;;
+    B|rootfs.1|system1)
+        slot="B"
+        expected="$B_DEV"
+        expected_rauc_slot="rootfs.1"
+        ;;
+    *)
+        echo "EDGEGUARD_SLOT=UNKNOWN"
+        echo "EDGEGUARD_SLOT_RAW=$slot_raw"
+        echo "EDGEGUARD_ERROR=no_valid_rauc_slot_in_proc_cmdline"
+        exit 2
+        ;;
 esac
+
+root_source="$(findmnt -n -o SOURCE / 2>/dev/null | head -n 1 || true)"
+if [ -z "$root_source" ]; then
+    root_source="$(mount | awk '$3 == "/" { print $1; exit }')"
+fi
+
+expected_real="$(canon_dev "$expected")"
+root_source_real="$(canon_dev "$root_source")"
+root_arg_real="$(canon_dev "$root_arg")"
+
+root_match="no"
+if [ "$root_source_real" = "$expected_real" ]; then
+    root_match="yes"
+elif [ "$root_arg_real" = "$expected_real" ]; then
+    root_match="yes"
+elif [ "$root_source" = "/dev/root" ] && [ "$root_arg_real" = "$expected_real" ]; then
+    root_match="yes"
+fi
+
+echo "EDGEGUARD_SLOT=$slot"
+echo "EDGEGUARD_SLOT_RAW=$slot_raw"
+echo "EDGEGUARD_EXPECTED_RAUC_SLOT=$expected_rauc_slot"
+echo "EDGEGUARD_EXPECTED_ROOTFS=$expected"
+echo "EDGEGUARD_EXPECTED_ROOTFS_REAL=$expected_real"
+echo "EDGEGUARD_ROOT_SOURCE=$root_source"
+echo "EDGEGUARD_ROOT_SOURCE_REAL=$root_source_real"
+echo "EDGEGUARD_ROOT_ARG=$root_arg"
+echo "EDGEGUARD_ROOT_ARG_REAL=$root_arg_real"
+echo "EDGEGUARD_ROOT_MATCH=$root_match"
+
+if [ "$root_match" = "yes" ]; then
+    exit 0
+fi
+
+exit 1
