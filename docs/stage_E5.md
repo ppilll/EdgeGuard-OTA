@@ -125,3 +125,64 @@ enable_keeper 存在，use_watchdog_on_fail 存在：
 ```
 
 除了健康检查失败能回滚之外，健康检查卡死、启动流程卡住、手动 reboot 失败 这类异常也能通过 watchdog 兜底复位。当前设计的最大风险是：use_watchdog_on_fail 依赖 keeper 已经成功启动，建议用 /run/edgeguard/watchdog.ready 做保护判断。
+
+你的当前状态是：E5-H health check、E5-W watchdog manual、watchdog keeper、health fail + watchdog reset + E4 fallback
+
+# 内核裁剪
+第一轮裁剪只允许裁“确定不用且不影响 OTA 可靠性主链路”的能力。你的 E5 原始边界明确要求必须保留 MMC、ext4、devtmpfs、procfs、sysfs、UART、serial console、watchdog core、i.MX6ULL watchdog、RAUC 所需基础能力和 /data ext4 挂载能力。
+```
+KDIR=/home/liu/桌面/project/ebf_linux_kernel
+OTA_DIR=/home/liu/work/EdgeGuard_OTA
+cp .config /home/liu/work/EdgeGuard_OTA/configs/kernel_vendor_baseline_rebuilt_full.config 
+
+CROSS_COMPILE=arm-linux-gnueabihf-
+make ARCH=arm CROSS_COMPILE="$CROSS_COMPILE" menuconfig
+
+make ARCH=arm CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
+scripts/diffconfig /home/liu/work/EdgeGuard_OTA/configs/kernel_vendor_baseline_rebuilt_full.config  .config \
+  | tee /home/liu/work/EdgeGuard_OTA/configs/kernel_config_diff_e5.txt
+
+cp .config /home/liu/work/EdgeGuard_OTA/configs/kernel_e5_trim_round1_full.config
+
+make ARCH=arm CROSS_COMPILE="$CROSS_COMPILE" savedefconfig
+
+cp defconfig /home/liu/work/EdgeGuard_OTA/configs/linux_kernel_edgeguard_e5_trim_round1_defconfig
+
+make ARCH=arm CROSS_COMPILE="$CROSS_COMPILE" zImage dtbs modules -j"$(nproc)"
+```
+# 裁剪后的内核启动时间
+```
+[    2.980633] EXT4-fs (mmcblk0p4): mounted filesystem with ordered data mode. Opts: (null)
+Starting syslogd: OK
+Starting klogd: OK
+Running sysctl: OK
+Starting mdev... OK
+modprobe: can't change directory to '/lib/modules': No such file or directory
+[S11edgeguard-data] start
+[S11edgeguard-data] /data already mounted
+[S11edgeguard-data] data partition ready
+Initializing random number generator: OK
+Saving random seed: [    4.711748] random: dd: uninitialized urandom read (512 bytes read)
+OK
+Starting system message bus: [    4.763515] random: dbus-uuidgen: uninitialized urandom read (12 bytes read)
+[    4.771121] random: dbus-uuidgen: uninitialized urandom read (8 bytes read)
+```
+# 裁剪前的启动时间
+```
+[    3.404303] EXT4-fs (mmcblk0p4): mounted filesystem with ordered data mode. Opts: (null)
+Starting syslogd: OK
+Starting klogd: OK
+Running sysctl: OK
+Starting mdev... OK
+modprobe: can't change directory to '/lib/modules': No such file or directory
+[S11edgeguard-data] start
+[S11edgeguard-data] /data already mounted
+[S11edgeguard-data] data partition ready
+Initializing random number generator: OK
+Saving random seed: [    5.243448] random: dd: uninitialized urandom read (512 bytes read)
+OK
+Starting system message bus: [    5.294665] random: dbus-uuidgen: uninitialized urandom read (12 bytes read)
+[    5.302267] random: dbus-uuidgen: uninitialized urandom read (8 bytes read)
+done
+
+```

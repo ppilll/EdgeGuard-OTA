@@ -35,6 +35,28 @@
 | i.MX watchdog | `imx2-wdt` | `dmesg: timeout 60 sec (nowayout=0)` | E5-W reset path | PASS | Use dmesg as timeout evidence |
 | Watchdog sysfs | `/sys/class/watchdog/watchdog0` | class symlink exists, detail files missing | inventory only | WARN | Not blocking manual test |
 
+
+| Capability | Required by | Trim result | Runtime evidence | Status |
+|---|---|---|---|---|
+| MMC / SD host | SD boot, A/B rootfs, data | kept | `/dev/mmcblk0p2`, `/dev/mmcblk0p3`, `/dev/mmcblk0p4` | PASS |
+| EXT4 | rootfs/data | kept | `findmnt /`, `findmnt /data` | PASS |
+| UART console | serial debug/log capture | kept | `console=ttymxc0,115200`, serial boot logs | PASS |
+| Watchdog core | E5-W reset path | kept | `/dev/watchdog`, `/dev/watchdog0`, `imx2-wdt` | PASS |
+| procfs | slot detection | kept | `/proc/cmdline` with `rauc.slot=A/B` | PASS |
+| sysfs | device visibility | kept | `/sys` available | PASS |
+| devtmpfs | device nodes | kept | `/dev/mmcblk*`, `/dev/watchdog*` | PASS |
+| RAUC bundle mount support | RAUC install | kept | loop/SquashFS/dm-verity config checked | PASS |
+| SOUND/audio | not used in EdgeGuard E5 | removed | no E5 regression | PASS |
+| V4L2/multimedia/camera | not used in EdgeGuard E5 | removed | no E5 regression | PASS |
+| Bluetooth | not used in EdgeGuard E5 | removed | no E5 regression | PASS |
+| Wi-Fi/WLAN | not used in EdgeGuard E5 | removed | no E5 regression | PASS |
+| Display/GPU | not used in serial-first E5 | removed | serial console still works | PASS |
+| INPUT/EVDEV/KEYBOARD/TOUCHSCREEN | not used in serial-first E5 | removed | serial login and scripts work | PASS |
+| unused NET/PHY drivers | not used in current SD/serial workflow | removed | RAUC local install and E5 tests pass | PASS |
+
+Note:
+Network/PHY removal is accepted only for the current E5 workflow because OTA bundle transfer and validation do not depend on target Ethernet/Wi-Fi. If later E6/E7 introduces network-based bundle delivery, SSH log collection, remote orchestration, or multi-device test control, network/PHY must be re-evaluated.
+
 ## Evidence files
 
 - 当前运行内核：Linux 4.19.35+，ARMv7 32-bit，SMP 配置，可抢占内核，构建于 2026-06-13。
@@ -50,3 +72,69 @@
 - SoC 外设：i.MX pinctrl、SNVS pinctrl、SDMA、RNG、thermal、I2C、SPI、WEIM、USB controller、USB serial、Bluetooth HCI UART、UART console 等相关驱动已经注册或 probe。
 
 - 挂载状态：/ 是 /dev/mmcblk0p2 ext4 rw,relatime；/data 是 /dev/mmcblk0p4 ext4 rw,noatime。
+
+第一个保守型裁剪内核移除了以下未使用的子系统：
+
+- 音频 / 音效  
+- V4L2 / 多媒体 / 摄像头  
+- 蓝牙  
+- Wi-Fi / WLAN  
+- 显示器 / GPU  
+- 输入 / EVDEV / 键盘 / 触摸屏  
+- 未使用的网络 / 物理层驱动程序
+启动时间从3.4秒提升到2.9秒，大约提高了15%。
+
+所有E5功能均无异常行为，已成功复现：
+- A/B rootfs 启动
+- RAUC 状态
+- U-Boot 的 `BOOT_ORDER`、`BOOT_A_LEFT`、`BOOT_B_LEFT`
+- 健康检查通过并标记为良好
+- 健康失败但未提前标记为良好
+- 时钟看门狗喂料正常
+- 时钟看门狗无喂料重置
+- 时钟看门狗守护程序
+- 健康失败 + 时钟看门狗重置 + 跳转到备用方案
+- `/data` 挂载并写入
+- 串行控制台/日志收集
+- MMC/Ext4/UART/时钟看门狗/procfs/sysfs/devtmpfs 运行时证据
+决定：
+此修剪后的内核将作为E5版本内核的基准线。
+在E5中不会进行进一步的激进修剪。
+如有需要，后续修剪将推迟至E6可靠性测试之后进行。
+
+PASS.
+
+## Scope
+
+E5 covers:
+
+- health check
+- RAUC mark-good policy
+- watchdog manual validation
+- watchdog keeper integration
+- health fail + watchdog reset + U-Boot fallback
+- kernel capability inventory
+- conservative kernel trimming
+
+Out of scope:
+
+- random power-cut relay testing
+- cloud OTA
+- web UI
+- multi-device management
+- differential update
+- secure boot
+- aggressive kernel minimization
+
+## Final Architecture
+
+```text
+new slot boot
+→ U-Boot passes rauc.slot=A/B
+→ Linux mounts rootfs
+→ S98edgeguard-watchdog starts keeper
+→ S99edgeguard-health runs health check
+→ PASS: mark-good + watchdog feed continues
+→ FAIL: do not mark-good + watchdog reset
+→ U-Boot consumes BOOT_<slot>_LEFT
+→ fallback to old good slot after retries are exhausted
