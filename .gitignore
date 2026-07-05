@@ -29,3 +29,4 @@ certs/*.srl
 # Generated RAUC bundles
 *.raucb
 bundles/
+scripts/__pycache__
